@@ -7,7 +7,6 @@ import (
 	"net"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 )
 
@@ -50,8 +49,8 @@ var (
 		ClientName string
 		Message    map[string]interface{}
 	})
-	brokerMessageReceiver chan<- map[string]interface{} // Brker Channel to receive messages from the server
-	serverID        string
+	brokerMessageReceiver chan<- map[string]interface{} // Broker Channel to receive messages from the client
+	brokerName        string
 	clientNumber    = 1 // Number of client
 	clientCount     = 1 // Number of clients
 	clientCountMutex sync.Mutex
@@ -82,6 +81,10 @@ func SetBrokerMessageReceiver(receiver chan<- map[string]interface{}) {
 	brokerMessageReceiver = receiver
 }
 
+func init() {
+    //fmt.Println("\nTCP SERVER V1.0.0")
+}
+
 func deleteWorker(data map[string][]Client, key string, valueToDelete string) {
 	availableWorkersLock.Lock()
 	defer availableWorkersLock.Unlock();
@@ -105,17 +108,19 @@ func deleteWorker(data map[string][]Client, key string, valueToDelete string) {
 func FindAvailableWorker(workerType string) (bool,string) {
 	availableWorkersLock.Lock()
 	defer availableWorkersLock.Unlock();
-	//fmt.Printf("\nLook for worker %s.\n", workerType)
+	////fmt.Printf("\nLook for worker %s.\n", workerType)
 	
 	if workers, ok := availableWorkers[workerType]; ok {
 		sort.Sort(ByCapacity(workers))
-		//fmt.Printf("Slice of workers %v.\n",slice)
+		////fmt.Printf("Slice of workers %v.\n",slice)
 		if len(workers) > 0 {
-			fmt.Printf("Client with most capacity: %+v\n", workers[0])
+			//fmt.Printf("Client with most capacity: %+v\n", workers[0])
+			workers[0].CurrentJobs++ //Increment the number of jobs as we are going to send it work
+			//fmt.Printf("Client capacity after increment: %+v\n", workers[0])
 			return true, workers[0].ServiceIdentifier
 		}
 	}
-	fmt.Printf("No worker found.\n")
+	//fmt.Printf("No worker found.\n")
 	return false, ""
 }
 
@@ -124,7 +129,7 @@ func handleConnection(conn net.Conn, serviceName string,clientType string,maxReq
 
 	clientNumberMutex.Lock()
 	serviceID := serviceName + strconv.Itoa(clientNumber)
-	fmt.Printf("Client ServiceIdentifier:%s NewName %s ClientNumber:%d.\n", serviceName, serviceID, clientNumber)
+	//fmt.Printf("Client ServiceIdentifier:%s NewName %s ClientNumber:%d.\n", serviceName, serviceID, clientNumber)
 	clientNumber++
 	clientNumberMutex.Unlock()
 
@@ -147,7 +152,7 @@ func handleConnection(conn net.Conn, serviceName string,clientType string,maxReq
 		availableWorkersLock.Unlock()
 	}
 
-	//fmt.Printf("Client %s connected to server %s.\n", serviceID, serverID)
+	fmt.Printf("%s connected to broker %s.\n", serviceID, brokerName)
 	//fmt.Printf("Worker pool after adding client:%s %v.\n", serviceID,availableWorkers)
 
 	decoder := json.NewDecoder(conn)
@@ -156,9 +161,9 @@ func handleConnection(conn net.Conn, serviceName string,clientType string,maxReq
 		var receivedMessage map[string]interface{}
 		err := decoder.Decode(&receivedMessage)
 		if err != nil {
-			fmt.Printf("Error decoding JSON from client %s on server %s: %s\n", serviceID, serverID, err)
-			lowercaseInput := strings.ToLower(err.Error())
-			if strings.Contains(lowercaseInput, "closed") || strings.Contains(lowercaseInput, "EOF") {
+			//fmt.Printf("Error decoding JSON from client %s on broker %s: %s\n", serviceID, brokerName, err)
+			//lowercaseInput := strings.ToLower(err.Error())
+			//if strings.Contains(lowercaseInput, "closed") || strings.Contains(lowercaseInput, "eof") {
 				clientsLock.Lock()
 				delete(clients, serviceID)
 				clientsLock.Unlock()
@@ -166,30 +171,40 @@ func handleConnection(conn net.Conn, serviceName string,clientType string,maxReq
 				clientCount--
 				clientCountMutex.Unlock()
 				deleteWorker(availableWorkers, serviceName, serviceID);
+				fmt.Printf("%s disconnected from broker %s.\n", serviceID, brokerName)
+				fmt.Printf("       ERROR:%s.\n", err.Error())
 				return
-			}
-			break
+			//}
+			//break
 		}
 
 		receivedMessage["SRC"] = serviceID
 		// Process the received message as needed
-		fmt.Printf("Received message from client %s on server %s: %+v\n", serviceID, serverID, receivedMessage)
+		//fmt.Printf("Received message from client %s on broker %s: %+v\n", serviceID, brokerName, receivedMessage)
 
 		if clientType==TypeWorker{ //add it back to the workers pool
 			availableWorkersLock.Lock()
+			////fmt.Printf("\n\n\nFinding workers for service %s\n",serviceName)
 			if workers, ok := availableWorkers[serviceName]; ok {
-				for _, worker := range workers {
+				////fmt.Printf("Finding worker with service ID %s\n", serviceID)
+				for index := range workers {
 					// Check if the Name field matches the targetName
-					if worker.ServiceIdentifier == serverID {
-						if worker.CurrentJobs > 0{
-							worker.CurrentJobs--
+					////fmt.Printf("Range over workers %s(%v):%s(%v)\n", worker.ServiceIdentifier,[]byte(worker.ServiceIdentifier),serviceID,[]byte(serviceID))
+
+					if availableWorkers[serviceName][index].ServiceIdentifier == serviceID {
+						//fmt.Println("Worker found. Current jobs:",availableWorkers[serviceName][index].CurrentJobs)
+						if availableWorkers[serviceName][index].CurrentJobs > 0{
+							//fmt.Printf("Before Decrement current jobs %v\n",availableWorkers[serviceName][index])
+							availableWorkers[serviceName][index].CurrentJobs--
+							//fmt.Printf("After Decrement current jobs %v\n",availableWorkers[serviceName][index])
+							break
 						}
 					}
 				}
 			}
 
 			availableWorkersLock.Unlock()
-			fmt.Printf("Worker pool after receiving from:%s %v.\n",serviceID, availableWorkers)
+			//fmt.Printf("Worker pool after receiving from:%s %v.\n",serviceID, availableWorkers)
 		}
 
 		// Send the received message to the main program
@@ -205,9 +220,9 @@ func handleConnection(conn net.Conn, serviceName string,clientType string,maxReq
 				//Encode the response and send it to the origin
 				encoder := json.NewEncoder(conn)
 				err := encoder.Encode(responeMessage)
-				fmt.Printf("Receive Channel Full\n")
+				//fmt.Printf("Receive Channel Full\n")
 				if err != nil {
-					fmt.Printf("Channel is full\n")
+					//fmt.Printf("Channel is full\n")
 					// Optionally handle disconnection or retry logic
 				}
 			}
@@ -222,52 +237,35 @@ func SendMessageToClient(clientName string, message map[string]interface{}) (boo
 	clientsLock.Unlock()
 
 	if exists {
-		if client.Type == TypeWorker{
-			deleteWorker(availableWorkers, client.ServiceName, client.ServiceIdentifier);
-			availableWorkersLock.Lock()
-			if workers, ok := availableWorkers[client.ServiceName]; ok {
-				for _, worker := range workers {
-					// Check if the Name field matches the targetName
-					if worker.ServiceIdentifier == client.ServiceIdentifier {
-							worker.CurrentJobs++
-							break
-					}
-				}
-			}
-			availableWorkersLock.Unlock()
-
-
-
-			//fmt.Printf("Worker pool after sending to client:%s %v.\n",client.ServiceIdentifier,availableWorkers)
-		}
+		//fmt.Printf("Client type found")
 		encoder := json.NewEncoder(client.Connection)
 		err := encoder.Encode(message)
 		if err != nil {
-			fmt.Printf("Error sending message to client %s on server %s: %s\n", clientName, serverID, err)
+			//fmt.Printf("Error sending message to client %s on broker %s: %s\n", clientName, brokerName, err)
 			return false, fmt.Errorf("TCP error (%s) on send to %s\n",err, clientName)
 			// Optionally handle disconnection or retry logic
 		}else{
-			fmt.Printf("Sending message to client %s on server %s\n", clientName, serverID)
+			//fmt.Printf("Sending message to client %s on broker %s\n", clientName, brokerName)
 		}
 	} else {
-		fmt.Printf("Client %s not found on server %s.------%v\n", clientName, serverID, clients)
+		//fmt.Printf("Client %s not found on broker %s.------%v\n", clientName, brokerName, clients)
 		return false, fmt.Errorf("Destination %s not found", clientName)
 		// Optionally handle client not found logic
 	}
 	return true, nil
 }
 
-// StartServer starts the TCP server on the specified port
+// StartServer starts the TCP broker on the specified port
 func StartServer(port, id string) {
-	serverID = id // Set the serverID
+	brokerName = id // Set the serverID
 	listener, err := net.Listen("tcp", ":"+port)
 	if err != nil {
-		fmt.Printf("Error starting server %s on port %s: %s\n", serverID, port, err)
+		//fmt.Printf("Error starting broker %s on port %s: %s\n", brokerName, port, err)
 		return
 	}
 	defer listener.Close()
 
-	fmt.Printf("Broker %s started. Listening on :%s\n", serverID, port)
+	fmt.Printf("Broker %s started. Listening on port:%s\n", brokerName, port)
 
 	go func() {
 		for {
@@ -283,7 +281,7 @@ func StartServer(port, id string) {
 				clientsLock.Lock()
 				delete(clients, disconnect)
 				clientsLock.Unlock()
-				fmt.Printf("Client %s disconnected from server %s.\n", disconnect, serverID)
+				//fmt.Printf("Client %s disconnected from broker %s.\n", disconnect, brokerName)
 			case send := <-sendToClient:
 				// Send a message to a specific client
 				SendMessageToClient(send.ClientName, send.Message)
@@ -294,7 +292,7 @@ func StartServer(port, id string) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			fmt.Printf("Error accepting connection on port %s: %s\n", port, err)
+			//fmt.Printf("Error accepting connection on port %s: %s\n", port, err)
 			continue
 		}
 
@@ -302,12 +300,12 @@ func StartServer(port, id string) {
 		var decodedData map[string]interface{}
 		err = json.NewDecoder(conn).Decode(&decodedData)
 		if err != nil {
-			fmt.Printf("Error getting client serviceName on port %s: %s\n", port, err)
+			//fmt.Printf("Error getting client serviceName on port %s: %s\n", port, err)
 			conn.Close()
 			continue
 		}
 
-		fmt.Println("Data received:",decodedData)
+		//fmt.Println("Data received:",decodedData)
 		clientName := "(Not Found)"
 		if value, ok := decodedData["ServiceName"]; ok {
 			// If the key exists, perform a type assertion to convert the value to a string
@@ -315,11 +313,11 @@ func StartServer(port, id string) {
 				// Type assertion successful, assign the value to clientName
 				clientName = strValue
 			} else {
-				fmt.Println("Value associated with 'serviceName' key is not a string")
+				//fmt.Println("Value associated with 'serviceName' key is not a string")
 				continue
 			}
 		} else {
-			fmt.Println("Key 'serviceName' not found in the map")
+			//fmt.Println("Key 'serviceName' not found in the map")
 			continue
 		}
 
@@ -330,11 +328,11 @@ func StartServer(port, id string) {
 				// Type assertion successful, assign the value to clientName
 				connectType = strValue
 			} else {
-				fmt.Println("Value associated with 'serviceName' key is not a string")
+				//fmt.Println("Value associated with 'serviceName' key is not a string")
 				continue
 			}
 		} else {
-			fmt.Println("Key 'serviceName' not found in the map")
+			//fmt.Println("Key 'serviceName' not found in the map")
 			continue
 		}
 
@@ -350,7 +348,7 @@ func StartServer(port, id string) {
 			} 
 		} 
 
-		fmt.Printf("ClientCount %d MaxClients:%d.\n", clientCount, MaxClients)
+		//fmt.Printf("ClientCount %d MaxClients:%d.\n", clientCount, MaxClients)
 		// Check the condition before starting a new goroutine
 		if clientCount < MaxClients {
 			clientCountMutex.Lock()
@@ -364,9 +362,9 @@ func StartServer(port, id string) {
 			responeMessage["ERROR_DESCRIPTION"] = ErrorDescription1001
 			encoder := json.NewEncoder(conn)
 			err := encoder.Encode(responeMessage)
-			fmt.Printf("Max Clients:Send Response\n")
+			//fmt.Printf("Max Clients:Send Response\n")
 			if err != nil {
-				fmt.Printf("Error sending message to client %s: %s\n", clientName, err)
+				//fmt.Printf("Error sending message to client %s: %s\n", clientName, err)
 				// Optionally handle disconnection or retry logic
 			}
 			conn.Close()
